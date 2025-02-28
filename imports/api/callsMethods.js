@@ -2,15 +2,8 @@ import { Meteor } from "meteor/meteor";
 import { Calls } from "./calls";
 
 Meteor.methods({
-    async "calls.create"() {  // ✅ Make the function async
-        const callId = await Calls.insertAsync({
-          offer: null,
-          answer: null,
-          createdAt: new Date(),
-          offerCandidates: [],
-          answerCandidates: [],
-        });
-    
+    async "calls.create"(doc) {  // ✅ Make the function async
+        const callId = await Calls.insertAsync(doc);
         return callId; // ✅ Ensure this is correct
       },     
 

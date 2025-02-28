@@ -12,7 +12,7 @@ const servers = {
 };
 
 // Global State
-const pc = new RTCPeerConnection(servers);
+// const pc = new RTCPeerConnection(servers);
 
 export default function VideoCall() {
   const [callId, setCallId] = useState("");
@@ -20,54 +20,83 @@ export default function VideoCall() {
   const [showInput, setShowInput] = useState(false);
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const [didIOffer, setDidIOffer]= useState(false);
+  const [localStream,setLocalStream] = useState(null);
+  const [remoteStream,setRemoteStream] = useState(null);
+  const [pc,setPc] = useState(null);
 
-  // Subscribe to the call
-  const call = useTracker(() => Calls.findOne({ _id: callId }), [callId]);
 
-  useEffect(() => {
-    if (call?.answer && !pc.currentRemoteDescription) {
-      pc.setRemoteDescription(new RTCSessionDescription(call.answer));
-    }
+  const fetchUserMedia = ()=>{
+    return new Promise(async(resolve, reject)=>{
+        try{
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                // audio: true,
+            });
+            localVideoRef.current.srcObject = stream;
+            setLocalStream(stream);
+            resolve();    
+        }catch(err){
+            console.log(err);
+            reject()
+        }
+    })
+}
+const createPeerConnection = (id, offerObj)=>{
+  return new Promise(async(resolve, reject)=>{
+      //RTCPeerConnection is the thing that creates the connection
+      //we can pass a config object, and that config object can contain stun servers
+      //which will fetch us ICE candidates
+      setPc(await new RTCPeerConnection(servers));
+      setRemoteStream(new MediaStream());
+      remoteVideoRef.current.srcObject = remoteStream;
 
-    if (call?.answerCandidates) {
-      call.answerCandidates.forEach((candidate) => {
-        pc.addIceCandidate(new RTCIceCandidate(candidate));
+
+      localStream.getTracks().forEach(track=>{
+          //add localtracks so that they can be sent once the connection is established
+          pc.addTrack(track,localStream);
+      })
+
+      pc.addEventListener("signalingstatechange", (event) => {
+          console.log(event);
+          console.log(pc.signalingState)
       });
-    }
-  }, [call]);
 
-  const startWebcam = async () => {
+      pc.onicecandidate = async(event) => {
+        if (event.candidate) {
+          await Meteor.callAsync("calls.addOfferCandidate", id, event.candidate.toJSON());
+        }
+      };
+      
+      pc.ontrack = (event) => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+        }
+      };
+
+      if(offerObj){
+        await pc.setRemoteDescription(offerObj.offer);
+      }
+      resolve();
+  })
+}
+
+
+  const createCall = async (offerObj) => {
     setWebcamActive(true);
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
-    }
-  
-    stream.getTracks().forEach((track) => {
-      pc.addTrack(track, stream);
+    const pc = new RTCPeerConnection(servers);    
+    const id = await Meteor.callAsync("calls.create", {
+      offer: null,
+      answer: null,
+      createdAt: new Date(),
+      offerCandidates: [],
+      answerCandidates: [],
     });
-  
-    pc.ontrack = (event) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = event.streams[0];
-      }
-    };
-  };
-  
-
-  const createCall = async () => {
-    // Create an empty call and get the ID
-    const id = await Meteor.callAsync("calls.create");
     setCallId(id);
-
-    pc.onicecandidate = async(event) => {
-      if (event.candidate) {
-        await Meteor.callAsync("calls.addOfferCandidate", id, event.candidate.toJSON());
-      }
-    };
-
-    // Create offer
+    await fetchUserMedia();
+    
+    await createPeerConnection(id,null);
+    
     const offerDescription = await pc.createOffer();
     await pc.setLocalDescription(offerDescription);
 
@@ -77,35 +106,46 @@ export default function VideoCall() {
     };
 
     await Meteor.callAsync("calls.setOffer", id, offer);
+    setDidIOffer(true);
 
-    Meteor.subscribe("answerCandidates", id);
   };
+  
 
-  const answerCall = async () => {
-    const call = Calls.findOne({ _id: callId });
 
-    if (!call?.offer) {
+  const answerCall = async (offerObj) => {
+    if (!offerObj) {
       alert("No offer found!");
       return;
     }
-
+    const id = await Meteor.callAsync("calls.create", {
+      offer: offerObj,
+      answer: null,
+      createdAt: new Date(),
+      offerCandidates: [],
+      answerCandidates: [],
+    });
+    setCallId(id);
+    await fetchUserMedia();
+    await createPeerConnection(id, offerObj);
+    const answerDescription = await pc.createAnswer();
+    await pc.setLocalDescription(answerDescription);
+    
+    
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        Meteor.callAsync("calls.addAnswerCandidate", callId, event.candidate.toJSON());
+        Meteor.callAsync("calls.addAnswerCandidate", id, event.candidate.toJSON());
       }
     };
 
-    await pc.setRemoteDescription(new RTCSessionDescription(call.offer));
+    await pc.setRemoteDescription(new RTCSessionDescription(offerObj));
 
-    const answerDescription = await pc.createAnswer();
-    await pc.setLocalDescription(answerDescription);
 
     const answer = {
       type: answerDescription.type,
       sdp: answerDescription.sdp,
     };
 
-    await Meteor.callAsync("calls.setAnswer", callId, answer);
+    await Meteor.callAsync("calls.setAnswer", offerObj.answer);
   };
 
   return (
@@ -121,13 +161,9 @@ export default function VideoCall() {
         </span>
       </div>
       <div className="buttons">
-        <button onClick={startWebcam} disabled={webcamActive}>
-          Start Webcam
-        </button>
         <button onClick={createCall} disabled={!webcamActive}>
           Create Call
         </button>
-        {callId && <p>Share this Call ID: {callId}</p>}
         <button onClick={() => setShowInput(!showInput)} disabled={!webcamActive}>
           {showInput ? "Hide Input" : "Join Call"}
         </button>
