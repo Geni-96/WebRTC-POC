@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Meteor } from "meteor/meteor";
-import { Calls } from "../api/calls";
-import { useTracker } from "meteor/react-meteor-data";
+import { Calls,Offers } from "../api/calls";
+import { useTracker,useSubscribe } from "meteor/react-meteor-data";
 
 // Signaling servers
 const servers = {
@@ -11,8 +11,7 @@ const servers = {
   iceCandidatePoolSize: 10,
 };
 
-// Global State
-// const pc = new RTCPeerConnection(servers);
+
 
 export default function VideoCall() {
   const [callId, setCallId] = useState("");
@@ -24,38 +23,49 @@ export default function VideoCall() {
   const [localStream,setLocalStream] = useState(null);
   const [remoteStream,setRemoteStream] = useState(null);
   const [pc,setPc] = useState(null);
+  const username = Math.floor(Math.random()*1000000);
 
+  //subscribe to changes in calldata
+  const isSubscribed = useSubscribe("callData", callId);
 
-  const fetchUserMedia = ()=>{
-    return new Promise(async(resolve, reject)=>{
-        try{
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: true,
-                // audio: true,
-            });
-            localVideoRef.current.srcObject = stream;
-            setLocalStream(stream);
-            resolve();    
-        }catch(err){
-            console.log(err);
-            reject()
-        }
-    })
-}
-const createPeerConnection = (id, offerObj)=>{
-  return new Promise(async(resolve, reject)=>{
-      //RTCPeerConnection is the thing that creates the connection
-      //we can pass a config object, and that config object can contain stun servers
-      //which will fetch us ICE candidates
-      setPc(await new RTCPeerConnection(servers));
+  // Track changes in the Calls collection
+  const call = useTracker(() => {
+    // Wait for the subscription to be ready before querying the collection
+    if (isSubscribed()) {
+      return Calls.findOne({ _id: callId });
+    }
+    return null; // Return null until the subscription is ready
+  }, [callId]);
+  console.log(call,'subscribed call data');
+  // useEffect(() => {
+  //   if(call?.answer){
+  //     pc.addIceCandidate()
+  //   }
+  // }, [callId]);
+
+  const fetchUserMedia = async () => {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+        });
+        localVideoRef.current.srcObject = stream;
+        return stream;  // Return the stream instead of waiting for state update
+    } catch (err) {
+        console.error("Error fetching media", err);
+        throw err;
+    }
+};
+
+const createPeerConnection = async(callId)=>{
+  try {
+    const pc = await new RTCPeerConnection(servers);
       setRemoteStream(new MediaStream());
       remoteVideoRef.current.srcObject = remoteStream;
-
-
-      localStream.getTracks().forEach(track=>{
-          //add localtracks so that they can be sent once the connection is established
-          pc.addTrack(track,localStream);
-      })
+    //   localStream.getTracks().forEach(track=>{
+    //     //add localtracks so that they can be sent once the connection is established
+    //     pc.addTrack(track,localStream);
+    // })
 
       pc.addEventListener("signalingstatechange", (event) => {
           console.log(event);
@@ -63,89 +73,155 @@ const createPeerConnection = (id, offerObj)=>{
       });
 
       pc.onicecandidate = async(event) => {
+        
         if (event.candidate) {
-          await Meteor.callAsync("calls.addOfferCandidate", id, event.candidate.toJSON());
+          await Meteor.callAsync("calls.addOfferCandidate",callId, event.candidate.toJSON());
         }
       };
       
       pc.ontrack = (event) => {
+        console.log('got a track from another user',event)
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = event.streams[0];
+          console.log('add remote stream')
+        }
+      };
+      return pc;
+  } catch (error) {
+    console.log(error);
+  }
+}
+
+const createPeerConnectionAnswer = async(callId,offerObj)=>{
+  try {
+    const pc = await new RTCPeerConnection(servers);
+      setRemoteStream(new MediaStream());
+      remoteVideoRef.current.srcObject = remoteStream;
+      console.log('callid',callId,'offerobj',offerObj,'pc',pc)
+    //   localStream.getTracks().forEach(track=>{
+    //     //add localtracks so that they can be sent once the connection is established
+    //     pc.addTrack(track,localStream);
+    // })
+
+      pc.addEventListener("signalingstatechange", (event) => {
+          console.log(event);
+          console.log(pc.signalingState)
+      });
+
+      pc.onicecandidate = async(event) => {
+        
+        if (event.candidate) {
+          await Meteor.callAsync("calls.addAnswerCandidate",callId, event.candidate.toJSON());
+        }
+      };
+      
+      pc.ontrack = (event) => {
+        console.log('got a track from another user',event)
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+          console.log('add remote stream')
         }
       };
 
       if(offerObj){
-        await pc.setRemoteDescription(offerObj.offer);
+        await pc.setRemoteDescription(offerObj);
       }
-      resolve();
-  })
+      return pc;
+  } catch (error) {
+    console.log(error);
+  }
 }
-
 
   const createCall = async (offerObj) => {
     setWebcamActive(true);
-    const pc = new RTCPeerConnection(servers);    
-    const id = await Meteor.callAsync("calls.create", {
+    // setPc(new RTCPeerConnection(servers));    
+    const callId = await Meteor.callAsync("calls.create",{
       offer: null,
       answer: null,
-      createdAt: new Date(),
+      offererUsername: username,
+      answererUsername:null,
       offerCandidates: [],
       answerCandidates: [],
     });
-    setCallId(id);
-    await fetchUserMedia();
+    console.log('callId', callId)
+    setCallId(callId);
+    const stream = await fetchUserMedia();
+    setLocalStream(stream);
     
-    await createPeerConnection(id,null);
+    // console.log(localStream);
     
-    const offerDescription = await pc.createOffer();
-    await pc.setLocalDescription(offerDescription);
-
-    const offer = {
-      sdp: offerDescription.sdp,
-      type: offerDescription.type,
-    };
-
-    await Meteor.callAsync("calls.setOffer", id, offer);
+    const pc = await createPeerConnection(callId);
+    setPc(pc);
+    // console.log(pc)
+    stream.getTracks().forEach(track=>{
+      //add localtracks so that they can be sent once the connection is established
+      pc.addTrack(track,stream);
+  })
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
     setDidIOffer(true);
+    console.log('offer created',offer);
+
+    await Meteor.callAsync("calls.setOffer", callId, offer);
+    setDidIOffer(true);
+    console.log(Calls.findOneAsync({_id:callId}))
 
   };
   
 
 
-  const answerCall = async (offerObj) => {
-    if (!offerObj) {
-      alert("No offer found!");
-      return;
-    }
-    const id = await Meteor.callAsync("calls.create", {
-      offer: offerObj,
+  const answerCall = async (callId) => {
+    console.log('callid in answercall', callId)
+    const offer = await Meteor.callAsync("calls.join", callId, username);
+    // console.log('offer found',offer);
+    const answererCallId = await Meteor.callAsync("calls.create",{
+      offer: offer,
       answer: null,
-      createdAt: new Date(),
+      offererUsername: null,
+      answererUsername:username,
       offerCandidates: [],
       answerCandidates: [],
     });
-    setCallId(id);
-    await fetchUserMedia();
-    await createPeerConnection(id, offerObj);
-    const answerDescription = await pc.createAnswer();
-    await pc.setLocalDescription(answerDescription);
+    await Meteor.callAsync("calls.setOffersAnswerer",answererCallId,username)
+    // await Meteor.callAsync("calls.setAnswersofferer",callId,username)
+    // console.log(answererCallId);
+    const stream = await fetchUserMedia();
+    setLocalStream(stream)
+    // console.log('answer stream',stream);
+    const pc = await createPeerConnectionAnswer(answererCallId,offer);
+    setPc(pc);
+    console.log('answer pc',pc)
+    stream.getTracks().forEach(track=>{
+      //add localtracks so that they can be sent once the connection is established
+      pc.addTrack(track,stream);
+    })
+    const answer = await pc.createAnswer({})
+    await pc.setLocalDescription(answer);
+    console.log('printing offer and answer',offer,answer)
     
+    await Meteor.callAsync("calls.setAnswer",answererCallId,answer)
+    await Meteor.callAsync("calls.setAnswer",callId,answer)
+
+    const offererIceCandidates = await Meteor.callAsync("calls.getIceCandidates",callId);
+    offererIceCandidates.forEach(async(candidate)=>{
+      await Meteor.callAsync("calls.addOfferCandidate",answererCallId,candidate);
+      pc.addIceCandidate(candidate);
+    })
+    const answererIceCandidates = await Meteor.callAsync("calls.getIceCandidates",answererCallId);
+    answererIceCandidates.forEach(async(candidate)=>{
+      await Meteor.callAsync("calls.addAnswerCandidate",callId,candidate);
+    })
+    // // const callId = await Meteor.callAsync("calls.create",username);
+    // setCallId(callId)
+    // const stream = await fetchUserMedia();
+    // setLocalStream(stream);
+    // const pc = await createPeerConnection(callId,offerObj);
+    // const answer = await pc.createAnswer({});
+    // await pc.setLocalDescription(answer);
+    // console.log(offerObj);
+    // console.log(answer);
+    // offerObj.answer = answer;
     
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        Meteor.callAsync("calls.addAnswerCandidate", id, event.candidate.toJSON());
-      }
-    };
-
-    await pc.setRemoteDescription(new RTCSessionDescription(offerObj));
-
-
-    const answer = {
-      type: answerDescription.type,
-      sdp: answerDescription.sdp,
-    };
-
-    await Meteor.callAsync("calls.setAnswer", offerObj.answer);
   };
 
   return (
@@ -161,10 +237,10 @@ const createPeerConnection = (id, offerObj)=>{
         </span>
       </div>
       <div className="buttons">
-        <button onClick={createCall} disabled={!webcamActive}>
+        <button onClick={createCall}>
           Create Call
         </button>
-        <button onClick={() => setShowInput(!showInput)} disabled={!webcamActive}>
+        <button onClick={() => setShowInput(!showInput)}>
           {showInput ? "Hide Input" : "Join Call"}
         </button>
         {showInput && (
@@ -172,7 +248,7 @@ const createPeerConnection = (id, offerObj)=>{
             value={callId}
             onChange={(e) => setCallId(e.target.value)}
             placeholder="Enter Call ID"
-            onKeyDown={(e) => e.key === "Enter" && answerCall()}
+            onKeyDown={(e) => e.key === "Enter" && answerCall(e.target.value)}
           />
         )}
         <button onClick={() => Meteor.callAsync("calls.hangup", callId)} disabled={!webcamActive || !callId}>
